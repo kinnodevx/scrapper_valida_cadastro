@@ -10,9 +10,32 @@ from dotenv import load_dotenv
 import os
 import time
 from selenium.webdriver.common.action_chains import ActionChains
+import requests
 
 # Carrega as variáveis de ambiente
 load_dotenv()
+
+def obter_endereco_cep(cep):
+    try:
+        # Remove caracteres não numéricos do CEP
+        cep = ''.join(filter(str.isdigit, cep))
+        
+        # Consulta a API ViaCEP
+        url = f'https://viacep.com.br/ws/{cep}/json/'
+        response = requests.get(url)
+        
+        if response.status_code == 200:
+            dados = response.json()
+            if not dados.get('erro'):
+                return {
+                    'logradouro': dados.get('logradouro', ''),
+                    'bairro': dados.get('bairro', ''),
+                    'uf': 'RR'  # Sempre RR
+                }
+        return None
+    except Exception as e:
+        print(f"Erro ao consultar CEP: {str(e)}")
+        return None
 
 def iniciar_navegador():
     # Configura as opções do Chrome
@@ -73,6 +96,93 @@ def fazer_login(driver, url_inicial):
         print(f"Erro durante o login: {str(e)}")
         return False
 
+def verificar_campos_obrigatorios(driver):
+    try:
+        wait = WebDriverWait(driver, 10)
+        print("\n--- Verificando campos obrigatórios ---")
+        
+        # Verifica primeiro se os campos críticos estão preenchidos
+        campos_criticos = {
+            'CEP': "ctl00_Cph_Container_AbaCliente_ucCadastroCliente_ucEnderecoResidencial_txtCEP_CAMPO",
+            'Conta': "ctl00_Cph_Container_AbaCliente_ucCadastroCliente_txtConta_CAMPO",
+            'DV': "ctl00_Cph_Container_AbaCliente_ucCadastroCliente_txtContaDV_CAMPO"
+        }
+
+        campos_vazios = []
+        for nome, id_campo in campos_criticos.items():
+            try:
+                campo = wait.until(
+                    EC.presence_of_element_located((By.ID, id_campo))
+                )
+                if not campo.get_attribute('value'):
+                    campos_vazios.append(nome)
+            except Exception as e:
+                print(f"Erro ao verificar campo {nome}: {str(e)}")
+                campos_vazios.append(nome)
+
+        if campos_vazios:
+            print(f"ERRO: Os seguintes campos obrigatórios estão vazios: {', '.join(campos_vazios)}")
+            print("Não será possível prosseguir com o preenchimento.")
+            return False
+
+        print("Todos os campos críticos estão preenchidos. Prosseguindo com as verificações...")
+
+        # Verifica e preenche Endereço
+        campo_endereco = wait.until(
+            EC.presence_of_element_located((By.ID, "ctl00_Cph_Container_AbaCliente_ucCadastroCliente_ucEnderecoResidencial_txtEndereco_CAMPO"))
+        )
+        if not campo_endereco.get_attribute('value'):
+            print("Campo Endereço está vazio, preenchendo...")
+            dados_endereco = obter_endereco_cep(os.getenv('CEP'))
+            if dados_endereco:
+                campo_endereco.clear()
+                campo_endereco.send_keys(dados_endereco['logradouro'])
+                print("Endereço preenchido")
+            time.sleep(1)
+
+        # Verifica e preenche Cidade
+        campo_cidade = wait.until(
+            EC.presence_of_element_located((By.ID, "ctl00_Cph_Container_AbaCliente_ucCadastroCliente_ucEnderecoResidencial_txtCidade_CAMPO"))
+        )
+        if not campo_cidade.get_attribute('value'):
+            print("Campo Cidade está vazio, preenchendo...")
+            campo_cidade.clear()
+            campo_cidade.send_keys("Boa Vista")  # Cidade padrão para RR
+            print("Cidade preenchida")
+            time.sleep(1)
+
+        # Verifica e preenche Data Admissão (valor fixo)
+        campo_data_admissao = wait.until(
+            EC.presence_of_element_located((By.ID, "ctl00_Cph_Container_AbaCliente_ucCadastroCliente_txtDataAdmissao_CAMPO"))
+        )
+        data_admissao = "20/03/2021"  # Valor fixo
+        if not campo_data_admissao.get_attribute('value') or campo_data_admissao.get_attribute('value') != data_admissao:
+            print("Campo Data Admissão está vazio ou incorreto, preenchendo...")
+            campo_data_admissao.clear()
+            campo_data_admissao.send_keys(data_admissao)
+            # Força o evento blur para aplicar a máscara
+            driver.execute_script("arguments[0].blur();", campo_data_admissao)
+            print(f"Data Admissão preenchida: {data_admissao}")
+            time.sleep(1)
+
+        # Verifica e preenche Banco
+        select_banco = Select(wait.until(
+            EC.presence_of_element_located((By.ID, "ctl00_Cph_Container_AbaCliente_ucCadastroCliente_cbBanco_CAMPO"))
+        ))
+        banco = os.getenv('BANCO')
+        if not select_banco.first_selected_option.get_attribute('value') or select_banco.first_selected_option.get_attribute('value') != banco:
+            print("Campo Banco está vazio ou incorreto, preenchendo...")
+            select_banco.select_by_value(banco)
+            print(f"Banco preenchido: {banco}")
+            time.sleep(1)
+
+        print("Verificação de campos obrigatórios concluída")
+        return True
+
+    except Exception as e:
+        print(f"Erro ao verificar campos obrigatórios: {str(e)}")
+        return False
+
 def preencher_formulario_cadastro(driver):
     try:
         wait = WebDriverWait(driver, 10)
@@ -130,18 +240,32 @@ def preencher_formulario_cadastro(driver):
         print("UF de naturalidade selecionada")
         time.sleep(1)
 
-        select_sexo = Select(wait.until(
-            EC.presence_of_element_located((By.ID, "ctl00_Cph_Container_AbaCliente_ucCadastroCliente_cbSexo_CAMPO"))
-        ))
-        select_sexo.select_by_value(os.getenv('SEXO'))
-        print("Sexo selecionado")
+        # Sexo
+        sexo = os.getenv('SEXO')
+        if sexo:
+            select_sexo = Select(driver.find_element(By.ID, "ctl00_Cph_Container_AbaCliente_ucCadastroCliente_cbSexo_CAMPO"))
+            # Mapeando o valor do sexo para o formato correto
+            sexo_value = 'M' if sexo.upper() == 'MASCULINO' else 'F'
+            select_sexo.select_by_value(sexo_value)
+            print("Sexo selecionado")
         time.sleep(1)
 
-        select_estado_civil = Select(wait.until(
-            EC.presence_of_element_located((By.ID, "ctl00_Cph_Container_AbaCliente_ucCadastroCliente_cbEstadoCivil_CAMPO"))
-        ))
-        select_estado_civil.select_by_value(os.getenv('ESTADO_CIVIL'))
-        print("Estado civil selecionado")
+        # Estado Civil
+        estado_civil = os.getenv('ESTADO_CIVIL')
+        if estado_civil:
+            # Valores válidos: 1 (Casado), 2 (Solteiro), 3 (Divorciado), 4 (Viuvo), 5 (Desquitado)
+            if estado_civil in ['1', '2', '3', '4', '5']:
+                select_estado_civil = Select(wait.until(
+                    EC.presence_of_element_located((By.ID, "ctl00_Cph_Container_AbaCliente_ucCadastroCliente_cbEstadoCivil_CAMPO"))
+                ))
+                select_estado_civil.select_by_value(estado_civil)
+                print("Estado civil selecionado")
+            else:
+                print(f"Valor inválido para estado civil: {estado_civil}. Usando valor padrão '2' (Solteiro)")
+                select_estado_civil = Select(wait.until(
+                    EC.presence_of_element_located((By.ID, "ctl00_Cph_Container_AbaCliente_ucCadastroCliente_cbEstadoCivil_CAMPO"))
+                ))
+                select_estado_civil.select_by_value('2')
         time.sleep(1)
 
         # Filiação
@@ -156,44 +280,64 @@ def preencher_formulario_cadastro(driver):
 
         # Endereço
         print("\n--- Preenchendo Endereço ---")
+        # Preenche CEP
+        cep = os.getenv('CEP')
         campo_cep = wait.until(
             EC.presence_of_element_located((By.ID, "ctl00_Cph_Container_AbaCliente_ucCadastroCliente_ucEnderecoResidencial_txtCEP_CAMPO"))
         )
         campo_cep.clear()
-        campo_cep.send_keys(os.getenv('CEP'))
+        campo_cep.send_keys(cep)
         print("CEP preenchido")
-        time.sleep(2)  # Aguarda o preenchimento automático do endereço
+        time.sleep(2)  # Aguarda o preenchimento automático
 
-        # Pula os campos que são preenchidos automaticamente:
-        # - Endereço
-        # - Bairro
-        # - Cidade
-        # - UF do endereço
-        print("Campos automáticos preenchidos")
+        # Obtém dados do endereço via API
+        dados_endereco = obter_endereco_cep(cep)
+        if dados_endereco:
+            # Preenche endereço
+            campo_endereco = wait.until(
+                EC.presence_of_element_located((By.ID, "ctl00_Cph_Container_AbaCliente_ucCadastroCliente_ucEnderecoResidencial_txtEndereco_CAMPO"))
+            )
+            campo_endereco.clear()
+            campo_endereco.send_keys(dados_endereco['logradouro'])
+            print("Endereço preenchido")
+            time.sleep(1)
 
-        campo_numero_log = wait.until(
-            EC.presence_of_element_located((By.ID, "ctl00_Cph_Container_AbaCliente_ucCadastroCliente_ucEnderecoResidencial_txtEnderecoNR_CAMPO"))
-        )
-        campo_numero_log.clear()
-        campo_numero_log.send_keys(os.getenv('NUMERO_LOG'))
-        print("Número do logradouro preenchido")
-        time.sleep(1)
+            # Preenche número
+            campo_numero = wait.until(
+                EC.presence_of_element_located((By.ID, "ctl00_Cph_Container_AbaCliente_ucCadastroCliente_ucEnderecoResidencial_txtEnderecoNR_CAMPO"))
+            )
+            campo_numero.clear()
+            campo_numero.send_keys(os.getenv('NUMERO'))
+            print("Número preenchido")
+            time.sleep(1)
 
-        campo_numero = wait.until(
-            EC.presence_of_element_located((By.ID, "ctl00_Cph_Container_AbaCliente_ucCadastroCliente_ucEnderecoResidencial_txtEnderecoNR_CAMPO"))
-        )
-        campo_numero.clear()
-        campo_numero.send_keys(os.getenv('NUMERO'))
-        print("Número preenchido")
-        time.sleep(1)
+            # Preenche bairro
+            campo_bairro = wait.until(
+                EC.presence_of_element_located((By.ID, "ctl00_Cph_Container_AbaCliente_ucCadastroCliente_ucEnderecoResidencial_txtBairro_CAMPO"))
+            )
+            campo_bairro.clear()
+            campo_bairro.send_keys(dados_endereco['bairro'])
+            print("Bairro preenchido")
+            time.sleep(1)
 
-        campo_complemento = wait.until(
-            EC.presence_of_element_located((By.ID, "ctl00_Cph_Container_AbaCliente_ucCadastroCliente_ucEnderecoResidencial_txtComplemento_CAMPO"))
-        )
-        campo_complemento.clear()
-        campo_complemento.send_keys(os.getenv('COMPLEMENTO'))
-        print("Complemento preenchido")
-        time.sleep(1)
+            # Preenche UF (sempre RR)
+            select_uf = Select(wait.until(
+                EC.presence_of_element_located((By.ID, "ctl00_Cph_Container_AbaCliente_ucCadastroCliente_ucEnderecoResidencial_cbUF_CAMPO"))
+            ))
+            select_uf.select_by_value('RR')
+            print("UF preenchida (RR)")
+            time.sleep(1)
+
+            # Preenche complemento
+            campo_complemento = wait.until(
+                EC.presence_of_element_located((By.ID, "ctl00_Cph_Container_AbaCliente_ucCadastroCliente_ucEnderecoResidencial_txtComplemento_CAMPO"))
+            )
+            campo_complemento.clear()
+            campo_complemento.send_keys(os.getenv('COMPLEMENTO'))
+            print("Complemento preenchido")
+            time.sleep(1)
+        else:
+            print("Erro ao obter dados do endereço via CEP")
 
         # Dados Profissionais
         print("\n--- Preenchendo Dados Profissionais ---")
@@ -347,6 +491,10 @@ def preencher_formulario_cadastro(driver):
             time.sleep(1)
         except Exception as e:
             print(f"Erro ao preencher email: {str(e)}")
+
+        # Antes de clicar no botão Atualizar Cliente, verifica os campos obrigatórios
+        print("\n--- Verificando campos obrigatórios antes de salvar ---")
+        verificar_campos_obrigatorios(driver)
 
         # Clica no botão "Atualizar Cliente"
         print("\n--- Salvando cadastro ---")
