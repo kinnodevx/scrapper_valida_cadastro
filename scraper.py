@@ -11,6 +11,7 @@ import os
 import time
 from selenium.webdriver.common.action_chains import ActionChains
 import requests
+from selenium.common.exceptions import UnexpectedAlertPresentException
 
 # Carrega as variáveis de ambiente
 load_dotenv()
@@ -43,7 +44,9 @@ def iniciar_navegador():
     chrome_options.add_argument('--start-maximized')
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--disable-dev-shm-usage')
-    # chrome_options.add_argument('--headless')  # Descomente para executar em modo headless
+    chrome_options.add_argument('--headless=new')  # Ativa o modo headless
+    chrome_options.add_argument('--disable-gpu')  # Necessário para alguns sistemas
+    chrome_options.add_argument('--window-size=1920,1080')  # Define uma resolução padrão
     
     # Inicializa o driver do Chrome
     service = Service()
@@ -182,6 +185,45 @@ def verificar_campos_obrigatorios(driver):
     except Exception as e:
         print(f"Erro ao verificar campos obrigatórios: {str(e)}")
         return False
+
+def notificar_frontend(cpf, status="success", message="Proposta aprovada com sucesso"):
+    max_retries = 3
+    retry_delay = 2  # segundos
+    
+    for attempt in range(max_retries):
+        try:
+            print(f"\nTentativa {attempt + 1} de notificar o frontend...")
+            
+            # Usa a URL da API do .env ou fallback para localhost
+            api_url = os.getenv('API_URL', 'http://localhost:5000/api/status')
+            
+            response = requests.post(
+                api_url,
+                json={
+                    "status": status,
+                    "message": message,
+                    "cpf": cpf,
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+                },
+                timeout=10  # timeout de 10 segundos
+            )
+            
+            if response.status_code == 200:
+                print("✅ Status enviado com sucesso para o frontend")
+                return True
+            else:
+                print(f"❌ Erro ao enviar status para o frontend: {response.status_code}")
+                print(f"Resposta: {response.text}")
+                
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Erro na requisição: {str(e)}")
+        
+        if attempt < max_retries - 1:
+            print(f"Aguardando {retry_delay} segundos antes da próxima tentativa...")
+            time.sleep(retry_delay)
+    
+    print("❌ Todas as tentativas de notificar o frontend falharam")
+    return False
 
 def preencher_formulario_cadastro(driver):
     try:
@@ -595,9 +637,34 @@ def preencher_formulario_cadastro(driver):
             print(f"Erro ao clicar no botão Aprovar: {str(e)}")
             driver.save_screenshot("erro_botao_aprovar.png")
 
+        # Tratamento do alerta de sucesso
+        try:
+            alert = driver.switch_to.alert
+            mensagem_alerta = alert.text
+            print(f"Mensagem do sistema: {mensagem_alerta}")
+            if "Proposta Aprovada com Sucesso" in mensagem_alerta:
+                alert.accept()
+                print("Proposta aprovada com sucesso!")
+                
+                # Notifica o frontend sobre o sucesso
+                notificar_frontend(os.getenv('CPF'))
+                
+        except Exception:
+            pass
+
         print("\n=== Formulário preenchido com sucesso! ===")
         return True
 
+    except UnexpectedAlertPresentException:
+        alert = driver.switch_to.alert
+        print(f"Mensagem do sistema: {alert.text}")
+        alert.accept()
+        print("Proposta aprovada com sucesso!")
+        
+        # Notifica o frontend sobre o sucesso mesmo em caso de exceção
+        notificar_frontend(os.getenv('CPF'))
+            
+        return True
     except Exception as e:
         print(f"\nErro ao preencher formulário: {str(e)}")
         return False
